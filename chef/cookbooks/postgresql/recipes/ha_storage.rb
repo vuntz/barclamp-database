@@ -27,6 +27,7 @@ database_environment = node[:database][:config][:environment]
 
 vip_primitive = "#{CrowbarDatabaseHelper.get_ha_vhostname(node)}-vip-admin"
 fs_primitive = "#{database_environment}-fs"
+ms_name = "#{database_environment}-ms"
 
 ip_addr = CrowbarDatabaseHelper.get_listen_address(node)
 
@@ -34,15 +35,52 @@ postgres_op = {}
 postgres_op["monitor"] = {}
 postgres_op["monitor"]["interval"] = "10s"
 
-if node[:database][:ha][:storage][:mode] != "shared"
+fs_params = {}
+fs_params["directory"] = "/var/lib/pgsql"
+if node[:database][:ha][:storage][:mode] == "drbd"
+  lvm_group = "drbd"
+  lvm_size = "50G"
+  drbd_port = "7788"
+  drbd_resource = "postgresql"
+  drbd_disk = "/dev/#{lvm_group}/#{drbd_resource}"
+  drbd_params = {}
+  drbd_params["drbd_resource"] = drbd_resource
+  fs_params["device"] = "/dev/drbd0"
+  fs_params["fstype"] = "xfs"
+elsif node[:database][:ha][:storage][:mode] == "shared"
+  fs_params["device"] = node[:database][:ha][:storage][:shared][:device]
+  fs_params["fstype"] = node[:database][:ha][:storage][:shared][:fstype]
+  unless node[:database][:ha][:storage][:shared][:options].empty?
+    fs_params["options"] = node[:database][:ha][:storage][:shared][:options]
+  end
+else
   raise "Invalid mode for HA storage!"
 end
-fs_params = {}
-fs_params["device"] = node[:database][:ha][:storage][:shared][:device]
-fs_params["directory"] = "/var/lib/pgsql"
-fs_params["fstype"] = node[:database][:ha][:storage][:shared][:fstype]
-unless node[:database][:ha][:storage][:shared][:options].empty?
-  fs_params["options"] = node[:database][:ha][:storage][:shared][:options]
+
+if node[:database][:ha][:storage][:mode] == "drbd"
+
+  lvm_logical_volume drbd_resource do
+    group lvm_group
+    size  lvm_size
+  end
+
+  node["drbd"]["rsc"][drbd_resource] = {
+    "port" => drbd_port,
+    "disk" => drbd_disk,
+    "device" => fs_params["device"],
+    "fs_type" => fs_params["fstype"],
+    "configured" => false
+  }
+
+  cluster_nodes = CrowbarPacemakerHelper.cluster_nodes(node)
+  cluster_nodes.each do |cl_node|
+    if cl_node[:fqdn] != node[:fqdn]
+      node["drbd"]["rsc"][drbd_resource]["remote_host"] = cl_node[:fqdn]
+    end
+  end
+  cl_founder = CrowbarPacemakerHelper.cluster_nodes(node, "pacemaker-cluster-founder").first
+  node["drbd"]["rsc"][drbd_resource]["master"] = (node[:fqdn] == cl_founder[:fqdn])
+  include_recipe "drbd::resource"
 end
 
 # Wait for all nodes to reach this point so we know that all nodes will have
@@ -55,6 +93,33 @@ end
 # Avoid races when creating pacemaker resources
 crowbar_pacemaker_sync_mark "wait-database_ha_storage" do
   revision node[:database]["crowbar-revision"]
+end
+
+if node[:database][:ha][:storage][:mode] == "drbd"
+
+  pacemaker_primitive "drbd_postgresql" do
+    agent "ocf:linbit:drbd"
+    params drbd_params
+    op postgres_op
+    action :create
+  end
+
+  pacemaker_ms ms_name do
+    rsc "drbd_postgresql"
+    meta ({
+      "meta master-max" => "1",
+      "master-node-max" => "1",
+      "clone-max" => "2",
+      "clone-node-max" => "1",
+      "notify" => "true"
+    })
+    action :create
+  end
+
+  execute "crm resource cleanup drbd_postgresql" do
+    subscribes :run, resources(:pacemaker_ms => ms_name), :immediate
+    action :nothing
+  end
 end
 
 pacemaker_primitive vip_primitive do
@@ -71,10 +136,6 @@ pacemaker_primitive fs_primitive do
   params fs_params
   op postgres_op
   action :create
-end
-
-crowbar_pacemaker_sync_mark "create-database_ha_storage" do
-  revision node[:database]["crowbar-revision"]
 end
 
 # wait for fs primitive to be active, and for the directory to be actually
