@@ -42,6 +42,7 @@ if node[:database][:ha][:storage][:mode] == "drbd"
   lvm_size = "50G"
   drbd_port = "7788"
   drbd_resource = "postgresql"
+  drbd_primitive = "drbd_#{drbd_resource}"
   drbd_disk = "/dev/#{lvm_group}/#{drbd_resource}"
   drbd_params = {}
   drbd_params["drbd_resource"] = drbd_resource
@@ -97,7 +98,7 @@ end
 
 if node[:database][:ha][:storage][:mode] == "drbd"
 
-  pacemaker_primitive "drbd_postgresql" do
+  pacemaker_primitive drbd_primitive do
     agent "ocf:linbit:drbd"
     params drbd_params
     op postgres_op
@@ -105,7 +106,7 @@ if node[:database][:ha][:storage][:mode] == "drbd"
   end
 
   pacemaker_ms ms_name do
-    rsc "drbd_postgresql"
+    rsc drbd_primitive
     meta ({
       "meta master-max" => "1",
       "master-node-max" => "1",
@@ -116,10 +117,19 @@ if node[:database][:ha][:storage][:mode] == "drbd"
     action :create
   end
 
-  execute "crm resource cleanup drbd_postgresql" do
-    subscribes :run, resources(:pacemaker_ms => ms_name), :immediate
-    action :nothing
-  end
+  ruby_block "wait for #{drbd_primitive} to be started" do
+    block do
+      begin
+        # Check that the drbd resource is running
+        cmd = "crm resource show #{ms_name} 2> /dev/null | grep -q \"Master\""
+        if ! ::Kernel.system(cmd)
+          Chef::Log.info("#{drbd_primitive} needs some cleanup")
+          run = "crm resource cleanup #{drbd_primitive} 2> /dev/null"
+          ::Kernel.system(run)
+        end
+      end
+    end
+  end # block
 end
 
 pacemaker_primitive vip_primitive do
@@ -136,6 +146,10 @@ pacemaker_primitive fs_primitive do
   params fs_params
   op postgres_op
   action :create
+end
+
+crowbar_pacemaker_sync_mark "create-database_ha_storage" do
+  revision node[:database]["crowbar-revision"]
 end
 
 # wait for fs primitive to be active, and for the directory to be actually
