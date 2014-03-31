@@ -37,17 +37,15 @@ postgres_op["monitor"]["interval"] = "10s"
 
 fs_params = {}
 fs_params["directory"] = "/var/lib/pgsql"
+
 if node[:database][:ha][:storage][:mode] == "drbd"
   drbd_resource = "postgresql"
-  drbd_primitive = "drbd_#{drbd_resource}"
-  drbd_params = {}
-  drbd_params["drbd_resource"] = drbd_resource
 
-  fs_params["fstype"] = "xfs"
   fs_params["device"] = crowbar_drbd "drbd for database" do
     resource_name drbd_resource
     size "50G"
   end
+  fs_params["fstype"] = "xfs"
 elsif node[:database][:ha][:storage][:mode] == "shared"
   fs_params["device"] = node[:database][:ha][:storage][:shared][:device]
   fs_params["fstype"] = node[:database][:ha][:storage][:shared][:fstype]
@@ -71,6 +69,9 @@ crowbar_pacemaker_sync_mark "wait-database_ha_storage" do
 end
 
 if node[:database][:ha][:storage][:mode] == "drbd"
+  drbd_primitive = "drbd_#{drbd_resource}"
+  drbd_params = {}
+  drbd_params["drbd_resource"] = drbd_resource
 
   pacemaker_primitive drbd_primitive do
     agent "ocf:linbit:drbd"
