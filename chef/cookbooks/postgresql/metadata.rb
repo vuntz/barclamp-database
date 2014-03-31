@@ -19,8 +19,6 @@ end
 end
  
 depends "openssl"
-depends "lvm"
-depends "drbd"
 
 attribute "postgresql/tunable",
   :display_name => "PostgreSQL Tunables",

@@ -38,16 +38,16 @@ postgres_op["monitor"]["interval"] = "10s"
 fs_params = {}
 fs_params["directory"] = "/var/lib/pgsql"
 if node[:database][:ha][:storage][:mode] == "drbd"
-  lvm_group = "drbd"
-  lvm_size = "50G"
-  drbd_port = "7788"
   drbd_resource = "postgresql"
   drbd_primitive = "drbd_#{drbd_resource}"
-  drbd_disk = "/dev/#{lvm_group}/#{drbd_resource}"
   drbd_params = {}
   drbd_params["drbd_resource"] = drbd_resource
-  fs_params["device"] = "/dev/drbd0"
+
   fs_params["fstype"] = "xfs"
+  fs_params["device"] = crowbar_drbd "drbd for database" do
+    resource_name drbd_resource
+    size "50G"
+  end
 elsif node[:database][:ha][:storage][:mode] == "shared"
   fs_params["device"] = node[:database][:ha][:storage][:shared][:device]
   fs_params["fstype"] = node[:database][:ha][:storage][:shared][:fstype]
@@ -56,32 +56,6 @@ elsif node[:database][:ha][:storage][:mode] == "shared"
   end
 else
   raise "Invalid mode for HA storage!"
-end
-
-if node[:database][:ha][:storage][:mode] == "drbd"
-
-  lvm_logical_volume drbd_resource do
-    group lvm_group
-    size  lvm_size
-  end
-
-  node["drbd"]["rsc"][drbd_resource] = {
-    "port" => drbd_port,
-    "disk" => drbd_disk,
-    "device" => fs_params["device"],
-    "fs_type" => fs_params["fstype"],
-    "configured" => false
-  }
-
-  cluster_nodes = CrowbarPacemakerHelper.cluster_nodes(node)
-  cluster_nodes.each do |cl_node|
-    if cl_node[:fqdn] != node[:fqdn]
-      node["drbd"]["rsc"][drbd_resource]["remote_host"] = cl_node[:fqdn]
-    end
-  end
-  cl_founder = CrowbarPacemakerHelper.cluster_nodes(node, "pacemaker-cluster-founder").first
-  node["drbd"]["rsc"][drbd_resource]["master"] = (node[:fqdn] == cl_founder[:fqdn])
-  include_recipe "drbd::resource"
 end
 
 # Wait for all nodes to reach this point so we know that all nodes will have
